@@ -63,6 +63,7 @@ def get_stock_data(ticker_symbol):
             'debtToEquity': get_float('debtToEquity'),
             'profitMargins': get_float('profitMargins'),
             'revenueGrowth': get_float('revenueGrowth'),
+            'earningsGrowth': get_float('earningsGrowth'),
             'ebitda': get_float('ebitda'),
             'returnOnAssets': get_float('returnOnAssets'),
             'currentRatio': get_float('currentRatio'),
@@ -72,6 +73,14 @@ def get_stock_data(ticker_symbol):
             'operatingMargins': get_float('operatingMargins'),
             'enterpriseToEbitda': get_float('enterpriseToEbitda'),
             'quickRatio': get_float('quickRatio'),
+            # VI Score 2.0 Additions
+            'freeCashflow': get_float('freeCashflow'),
+            'operatingCashflow': get_float('operatingCashflow'),
+            'totalRevenue': get_float('totalRevenue'),
+            # Metadata for Verification
+            'last_price_time': info.get('regularMarketTime', 0), # Unix Timestamp
+            'currency': info.get('currency', 'THB'),
+            'exchange': info.get('exchange', 'SET'),
         }
         return data
     except Exception as e:
@@ -457,8 +466,29 @@ def calculate_valuations(data, risk_free_rate=RISK_FREE_RATE, market_return=MARK
         mos = np.nan
         status = "Data Unavailable"
 
+        # Pass through VI Score 2.0 fields
+    peg = data.get('pegRatio')
+    if pd.isna(peg):
+        # Fallback Calculation: P/E / (Earnings Growth * 100)
+        pe = data.get('price', 0) / data.get('trailingEps', 1) if data.get('trailingEps', 0) > 0 else 0
+        g = data.get('earningsGrowth', 0)
+        if pe > 0 and g > 0:
+            peg = pe / (g * 100)
+        else:
+            peg = 999 # Invalid or no growth
+
+    new_fields = {
+        'freeCashflow': data.get('freeCashflow', 0),
+        'operatingCashflow': data.get('operatingCashflow', 0),
+        'totalRevenue': data.get('totalRevenue', 0),
+        'pegRatio': peg,
+        'currentRatio': data.get('currentRatio', 0),
+        'grossMargins': data.get('grossMargins', 0),
+    }
+
     return {
         **data,
+        **new_fields,
         'k_percent': k * 100,
         'valuation_ddm': val_ddm,
         'valuation_pe': val_pe,

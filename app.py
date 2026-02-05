@@ -115,12 +115,17 @@ if not df.empty:
     df['margin_of_safety'] = df['margin_of_safety'].fillna(-100)
     df['marketCap'] = df['marketCap'].fillna(0)
     df['revenueGrowth'] = df['revenueGrowth'].fillna(0)
+    df['pegRatio'] = df['pegRatio'].fillna(999)
+    df['currentRatio'] = df['currentRatio'].fillna(0)
+    df['grossMargins'] = df['grossMargins'].fillna(0)
+    df['freeCashflow'] = df['freeCashflow'].fillna(0)
     
     # NOTE: yfinance 'debtToEquity' is usually returned as a percentage (e.g., 150 means 1.5x).
     # We need to divide by 100 for display if we want 'x', but for scoring logic check raw value.
     # Let's fix the dataframe column for display purposes to be 'x' (ratio).
     df['debtToEquityRatio'] = df['debtToEquity'] / 100
 
+    # 1. Base Score (6 Points)
     df['score_debt'] = df['debtToEquity'].apply(lambda x: 1 if x < 200 else 0) # < 200% = < 2.0x
     df['score_roe'] = df['returnOnEquity'].apply(lambda x: 1 if x > 0.15 else 0)
     df['score_npm'] = df['profitMargins'].apply(lambda x: 1 if x > 0.10 else 0)
@@ -128,8 +133,25 @@ if not df.empty:
     df['score_size'] = df['marketCap'].apply(lambda x: 1 if x > 50_000_000_000 else 0) # > 50B THB
     df['score_growth'] = df['revenueGrowth'].apply(lambda x: 1 if x > 0.05 else 0) # > 5% Growth
     
+    # 2. VI Score 2.0 (New 4 Points)
+    # 7. Cash Flow Strength: Free Cash Flow > 0 (Real Cash Generation)
+    df['score_fcf'] = df['freeCashflow'].apply(lambda x: 1 if x > 0 else 0)
+    
+    # 8. Valuation Growth (GARP): PEG < 1.5 (Not overpaying for growth)
+    df['score_peg'] = df['pegRatio'].apply(lambda x: 1 if x > 0 and x < 1.5 else 0)
+    
+    # 9. Liquidity: Current Ratio > 1.5 (Can pay short-term debts)
+    df['score_liquidity'] = df['currentRatio'].apply(lambda x: 1 if x > 1.5 else 0)
+    
+    # 10. Competitive Advantage: Gross Margin > 20% (Pricing Power)
+    df['score_gm'] = df['grossMargins'].apply(lambda x: 1 if x > 0.20 else 0)
+
+    # Total Scores
     df['Quality Score'] = (df['score_debt'] + df['score_roe'] + df['score_npm'] + 
                            df['score_mos'] + df['score_size'] + df['score_growth'])
+                           
+    df['VI Score'] = (df['Quality Score'] + 
+                      df['score_fcf'] + df['score_peg'] + df['score_liquidity'] + df['score_gm'])
 
 
 # --- SIDEBAR NAVIGATION ---
@@ -160,21 +182,33 @@ if page == "แดชบอร์ดภาพรวม":
         col2.metric("หุ้นราคาถูกกว่ามูลค่า", f"{undervalued_count}")
         col3.metric("ส่วนเผื่อความปลอดภัยเฉลี่ย (MOS)", f"{avg_mos:.2f}%")
         
-        # --- QUALITY SCORING (Enhanced Auto 6 Points) ---
+        # --- QUALITY SCORING (Enhanced Auto 10 Points) ---
         # 1. Low Debt (D/E < 200%)
         # 2. Strong ROE (> 15%)
         # 3. High NPM (> 10%)
         # 4. Undervalued (MOS > 0)
         # 5. Market Leader Proxy (Market Cap > 50 Billion THB)
         # 6. Growth Proxy (Revenue Growth > 0%)
+        # 7. Cash Flow Strength (FCF > 0)
+        # 8. Valuation Growth (PEG < 1.5)
+        # 9. Liquidity (Current Ratio > 1.5)
+        # 10. Competitive Advantage (Gross Margin > 20%)
         
         # Sidebar Filter
         st.sidebar.markdown("---")
         st.sidebar.subheader("🔍 ตัวกรองหุ้น (Screener)")
-        st.sidebar.info("ℹ️ **ระบบคะแนนแบบใหม่:** สูงสุด **6 คะแนน** (รวมขนาดกิจการ > 5 หมื่นล้าน และ การเติบโต > 0%)")
-        min_score = st.sidebar.slider("คะแนนคุณภาพขั้นต่ำ (เต็ม 6)", 0, 6, 4, help="กรองจาก: หนี้ต่ำ, ROE>15%, NPM>10%, ราคาถูก, หุ้นใหญ่, รายได้โต")
+        st.sidebar.info("ℹ️ **ระบบคะแนนใหม่ (VI Score):** เต็ม **10 คะแนน** เพิ่มเกณฑ์ FCF, PEG, สภาพคล่อง, และ Gross Margin")
         
-        filtered_df = df[df['Quality Score'] >= min_score].copy()
+        # Two-step slider or separate? Let's use one slider for VI Score
+        min_score = st.sidebar.slider("คะแนนคุณภาพขั้นต่ำ (เต็ม 10)", 0, 10, 6, help="กรองจาก 10 ปัจจัยคุณภาพ (เดิม 6 + ใหม่ 4)")
+        
+        # Add checkbox for "Cash Flow Positive Only"
+        filter_fcf = st.sidebar.checkbox("เฉพาะที่มีกระแสเงินสดอิสระบวก (FCF > 0)", value=False)
+        
+        filtered_df = df[df['VI Score'] >= min_score].copy()
+        
+        if filter_fcf:
+            filtered_df = filtered_df[filtered_df['freeCashflow'] > 0]
 
         # --- ADVANCED SCANNING (Magic Formula & F-Score) ---
         st.sidebar.markdown("---")
@@ -241,19 +275,17 @@ if page == "แดชบอร์ดภาพรวม":
         st.markdown("---")
         st.subheader("🏆 10 สุดยอดหุ้นแกร่ง (The Super Stocks)")
         st.markdown(f"""
-        คัดเลือกจาก **ราคาถูก (MOS > 0)**, **คุณภาพดี (ROE > 10%)**, **ปันผลใช้ได้ (> 3%)**, และ **คะแนน Quant >= {min_score}**
-        ผสานพลังกับ **Magic Formula** และ **F-Score** (ถ้ามีข้อมูล) เพื่อหาที่สุดของหุ้นคุณค่า
+        คัดเลือกจาก **ราคาถูก (MOS > 0)**, **คุณภาพดีเยี่ยม (VI Score > {min_score})**, **กระแสเงินสดแกร่ง**, และ **ความเสี่ยงต่ำ**
         """)
         
         # Calculate yield first (for filtering)
         df['dividendYield_calc'] = df['dividendRate'] / df['price']
         
-        # 1. Base Filter
+        # 1. Base Filter (Using VI Score)
+        # We relax dividend rule slightly for Growth/Quality focus if Score is high
         super_candidates = df[
             (df['status'] == 'Undervalued') & 
-            (df['returnOnEquity'] > 0.10) &
-            (df['dividendYield_calc'] > 0.03) & # Relaxed dividend slightly to allow growth stocks
-            (df['Quality Score'] >= min_score)
+            (df['VI Score'] >= min_score)
         ].copy()
         
         # 2. Advanced Scoring (if available)
@@ -297,17 +329,19 @@ if page == "แดชบอร์ดภาพรวม":
             norm_fcf = normalize(super_candidates['fcf_yield'])
             norm_z = normalize(super_candidates['z_score'])
             norm_sgr = normalize(super_candidates['sgr'])
+            norm_viscore = normalize(super_candidates['VI Score']) # Add VI Score
 
             # Adjusted weighting for FCF, Z-Score, SGR
             super_candidates['Super_Score'] = (
-                (norm_mos * 0.20) + 
-                (norm_div * 0.10) + 
+                (norm_mos * 0.15) + 
+                (norm_div * 0.05) + 
                 (norm_roe * 0.10) + 
                 (norm_f * 0.10) + 
                 (norm_magic * 0.10) +
                 (norm_fcf * 0.15) +
-                (norm_z * 0.15) +
-                (norm_sgr * 0.10)
+                (norm_z * 0.10) +
+                (norm_sgr * 0.05) +
+                (norm_viscore * 0.20) # High weight on VI Score
             ) * 100
             
             # Sort by Super Score
@@ -316,7 +350,8 @@ if page == "แดชบอร์ดภาพรวม":
         else:
             # Fallback to original sorting if no advanced data yet
             st.info("💡 **Tips:** กดปุ่ม 'วิเคราะห์ Magic Formula & F-Score' ด้านซ้าย เพื่อเพิ่มความแม่นยำในการจัดอันดับ")
-            top_picks = super_candidates.sort_values(by='margin_of_safety', ascending=False).head(10)
+            # Sort by VI Score then MOS
+            top_picks = super_candidates.sort_values(by=['VI Score', 'margin_of_safety'], ascending=[False, False]).head(10)
         
         
         if not top_picks.empty:
@@ -326,10 +361,10 @@ if page == "แดชบอร์ดภาพรวม":
             
             # Display Top 10 nicely
             cols_to_show = [
-                'symbol', 'price', 'fair_value'
+                'symbol', 'VI Score', 'price', 'fair_value'
             ]
             col_names = [
-                'หุ้น', 'ราคา', 'Fair'
+                'หุ้น', 'VI Score', 'ราคา', 'Fair'
             ]
             
             # If advanced analysis is done, insert Graham next to Fair Value
@@ -356,12 +391,12 @@ if page == "แดชบอร์ดภาพรวม":
             cols_to_show.extend([
                 'P/E', 'P/BV', 'trailingEps', 'returnOnAssets',
                 'returnOnEquity', 'debtToEquityRatio', 'currentRatio', 'profitMargins',
-                'dividendRate', 'dividendYield_calc', 'Quality Score'
+                'dividendRate', 'dividendYield_calc', 'VI Score'
             ])
             col_names.extend([
                 'P/E', 'P/BV', 'EPS', 'ROA%',
                 'ROE%', 'D/E', 'Liquidity', 'NPM%',
-                'ปันผล(฿)', 'ปันผล(%)', 'Q-Score'
+                'ปันผล(฿)', 'ปันผล(%)', 'VI Score'
             ])
             
             # Add remaining advanced columns
@@ -372,6 +407,9 @@ if page == "แดชบอร์ดภาพรวม":
             top_display = top_picks[cols_to_show].copy()
             top_display.columns = col_names
             
+            # Remove duplicate columns if any (e.g. VI Score if added multiple times)
+            top_display = top_display.loc[:, ~top_display.columns.duplicated()]
+
             # Dynamic formatting dict
             fmt_dict = {
                 'ราคา': '{:.2f}',
@@ -394,7 +432,7 @@ if page == "แดชบอร์ดภาพรวม":
                 'EY%': '{:.2%}',
                 'Score': '{:.0f}',
                 'F-Score': '{:.0f}',
-                'Q-Score': '{:.0f}',
+                'VI Score': '{:.0f}',
                 'FCF%': '{:.2%}',
                 'Z-Score': '{:.2f}',
                 'SGR%': '{:.2%}'
@@ -737,6 +775,30 @@ elif page == "วิเคราะห์หุ้นรายตัว":
                          st.error("ข้อมูลไม่เพียงพอสำหรับสร้าง PE Band (ต้องการกำไรย้อนหลังต่อเนื่อง)")
 
                 # --- 8 Qualities Checklist (Enhanced) ---
+                st.markdown("---")
+                
+                # --- RAW DATA VERIFICATION (NEW) ---
+                with st.expander("🔍 ตรวจสอบความถูกต้องของข้อมูล (Data Verification)", expanded=False):
+                    st.markdown("### แหล่งที่มาและเวลาของข้อมูล (Data Source & Timestamp)")
+                    
+                    # Convert timestamp to readable format
+                    last_ts = valuation.get('last_price_time', 0)
+                    last_time_str = "N/A"
+                    if last_ts > 0:
+                        import datetime
+                        last_time_str = datetime.datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    st.info(f"""
+                    **แหล่งข้อมูล:** Yahoo Finance (Real-time delay 15-20 mins)
+                    **เวลาล่าสุดของราคา (Last Price Time):** {last_time_str}
+                    **สกุลเงิน (Currency):** {valuation.get('currency', 'THB')}
+                    **ตลาด (Exchange):** {valuation.get('exchange', 'SET')}
+                    """)
+
+                    st.markdown("### ข้อมูลดิบจากระบบ (Raw Data Inspector)")
+                    st.json(valuation)
+                    st.caption("*หากพบข้อมูลไม่ตรงกับ SETSMART หรือ Streaming อาจเกิดจากความล่าช้าของ Source หรือรอบบัญชีที่แตกต่างกัน (TTM vs Annual)*")
+
                 st.markdown("---")
                 st.subheader("📋 แบบประเมินคุณภาพหุ้น VI (Checklist)")
                 
