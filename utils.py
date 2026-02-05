@@ -48,6 +48,7 @@ def get_stock_data(ticker_symbol):
             'price': get_float('currentPrice'),
             'beta': get_float('beta'),
             'dividendRate': get_float('dividendRate'),
+            'dividendYield': get_float('dividendYield'),
             'payoutRatio': get_float('payoutRatio'),
             'trailingEps': get_float('trailingEps'),
             'bookValue': get_float('bookValue'),

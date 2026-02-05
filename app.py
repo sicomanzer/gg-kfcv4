@@ -934,6 +934,170 @@ elif page == "แนะนำพอร์ตการลงทุน":
             st.markdown("##### 🌍 ตลาดเกิดใหม่ (10%)")
             st.markdown("- **เน้น:** อินเดีย, เวียดนาม, อินโดฯ\n- **กองทุน:** `K-INDX` (อินเดีย), `ASP-VIET`")
 
+        # --- PORTFOLIO SIMULATOR ---
+        st.markdown("---")
+        st.subheader("🛠️ จำลองพอร์ตหุ้น (Portfolio Simulator)")
+        st.caption("จัดพอร์ตตาม Asset Allocation ที่แนะนำ เลือกสินทรัพย์ในแต่ละกลุ่มเพื่อคำนวณผลตอบแทนคาดหวัง")
+
+        # Helper Data for Non-Stock Assets (Estimated Yields & Proxy Prices)
+        # Price is dummy 10.0 just for calculating quantity roughly if needed, mostly for amount allocation
+        ASSET_PROXY = {
+            "BOND": {"price": 10.0, "yield": 0.025}, # 2.5% Yield
+            "GLOBAL": {"price": 10.0, "yield": 0.01}, # 1.0% Yield (Growth focus)
+            "EM": {"price": 10.0, "yield": 0.02}, # 2.0% Yield
+        }
+
+        # Categories mapping to Logic
+        # 1. Fixed Income (40%) -> Manual Selection (Mock List)
+        # 2. Thai Large (15%) -> SET50 from df
+        # 3. Global (15%) -> Manual Selection (Mock List)
+        # 4. REITs (10%) -> REITs from df (Filter by name/sector?)
+        # 5. Growth (10%) -> Non-SET50 from df
+        # 6. Emerging (10%) -> Manual Selection (Mock List)
+
+        sim_budget = st.number_input("เงินลงทุนสำหรับพอร์ตนี้ (บาท)", min_value=1000.0, value=float(capital), step=1000.0)
+        
+        # --- SELECTION SECTION ---
+        st.markdown("#### 1. เลือกสินทรัพย์เข้าพอร์ต")
+        
+        col_sel1, col_sel2 = st.columns(2)
+        
+        selected_assets = {} # Store {category: [list of assets]}
+
+        with col_sel1:
+            st.markdown("**1. ตราสารหนี้ & พันธบัตร (40%)**")
+            opts_bond = ["พันธบัตรรัฐบาล (Gov Bond)", "หุ้นกู้เอกชน (Corp Bond)", "K-FIXED", "SCBFIXED", "TMBABF"]
+            selected_assets["Fixed Income"] = st.multiselect("เลือกกองทุน/ตราสารหนี้:", opts_bond, default=["พันธบัตรรัฐบาล (Gov Bond)", "K-FIXED"])
+            
+            st.markdown("**2. หุ้นไทยขนาดใหญ่ (15%)**")
+            # Filter Large Cap (>50B)
+            large_cap_list = df[df['marketCap'] > 50_000_000_000]['symbol'].tolist()
+            def_large = [x for x in ['ADVANC', 'PTT', 'AOT', 'KBANK', 'CPALL'] if x in large_cap_list]
+            selected_assets["Thai Large Cap"] = st.multiselect("เลือกหุ้นขนาดใหญ่ (SET50):", sorted(large_cap_list), default=def_large)
+            
+            st.markdown("**3. หุ้นต่างประเทศ (15%)**")
+            opts_global = ["S&P500 (SPX)", "Nasdaq-100 (NDX)", "ONE-ULTRAP", "SCBNDQ", "K-CHANGE", "TMBGQG"]
+            selected_assets["Global Stocks"] = st.multiselect("เลือกกองทุนต่างประเทศ:", opts_global, default=["S&P500 (SPX)", "ONE-ULTRAP"])
+
+        with col_sel2:
+            st.markdown("**4. กองทุนอสังหาฯ (10%)**")
+            # Filter REITs (Approximate by Name if Sector not clean, or manual list intersection)
+            # Let's use a broad filter or manual known list + allow all
+            # Try to find Property Fund in df if possible, else use known list
+            # For safety, list all but pre-select known REITs
+            known_reits = ['CPNREIT', 'WHAIR', 'FTREIT', 'ALLY', 'DIF', 'TFFIF', 'LHHOTEL', 'GVREIT']
+            valid_reits = [x for x in known_reits if x in df['symbol'].values]
+            selected_assets["REITs"] = st.multiselect("เลือกกองทุนอสังหาฯ (REITs):", sorted(df['symbol'].unique()), default=valid_reits)
+            
+            st.markdown("**5. หุ้นเติบโต / หุ้นเล็ก (10%)**")
+            # Filter Small Cap (<50B)
+            small_cap_list = df[df['marketCap'] <= 50_000_000_000]['symbol'].tolist()
+            def_small = [x for x in ['JMT', 'FORTH', 'XO', 'SIS', 'COM7'] if x in small_cap_list]
+            selected_assets["Growth Stocks"] = st.multiselect("เลือกหุ้นเติบโต/หุ้นเล็ก:", sorted(small_cap_list), default=def_small)
+            
+            st.markdown("**6. ตลาดเกิดใหม่ (10%)**")
+            opts_em = ["Vietnam ETF", "India ETF", "China Tech", "K-INDX", "ASP-VIET", "E1VFVN3001"]
+            selected_assets["Emerging Markets"] = st.multiselect("เลือกกองทุนตลาดเกิดใหม่:", opts_em, default=["Vietnam ETF", "K-INDX"])
+
+        # --- CALCULATION ---
+        # Allocation Rules
+        alloc_rules = {
+            "Fixed Income": 0.40,
+            "Thai Large Cap": 0.15,
+            "Global Stocks": 0.15,
+            "REITs": 0.10,
+            "Growth Stocks": 0.10,
+            "Emerging Markets": 0.10
+        }
+        
+        sim_rows = []
+        
+        for cat, pct in alloc_rules.items():
+            cat_budget = sim_budget * pct
+            picks = selected_assets.get(cat, [])
+            
+            if picks:
+                budget_per_asset = cat_budget / len(picks)
+                for asset in picks:
+                    # Determine Price & Yield
+                    price = 0
+                    div_yield = 0
+                    
+                    # Check if it's a real stock in df
+                    if asset in df['symbol'].values:
+                        row = df[df['symbol'] == asset].iloc[0]
+                        price = row.get('price', 0)
+                        
+                        # Try to get yield from multiple sources
+                        div_yield = 0
+                        
+                        # 1. Try explicit dividendYield
+                        y_val = row.get('dividendYield', 0)
+                        if pd.notnull(y_val) and y_val > 0:
+                            div_yield = y_val
+                        
+                        # 2. If 0, try dividendRate / price
+                        if div_yield == 0 and price > 0:
+                            d_rate = row.get('dividendRate', 0)
+                            if pd.notnull(d_rate) and d_rate > 0:
+                                div_yield = d_rate / price
+                    else:
+                        # Fallback to Proxy
+                        if cat == "Fixed Income":
+                            price = ASSET_PROXY["BOND"]["price"]
+                            div_yield = ASSET_PROXY["BOND"]["yield"]
+                        elif cat == "Global Stocks":
+                            price = ASSET_PROXY["GLOBAL"]["price"]
+                            div_yield = ASSET_PROXY["GLOBAL"]["yield"]
+                        elif cat == "Emerging Markets":
+                            price = ASSET_PROXY["EM"]["price"]
+                            div_yield = ASSET_PROXY["EM"]["yield"]
+                        else:
+                             # Default fallback
+                            price = 10.0
+                            div_yield = 0.0
+                    
+                    qty = int(budget_per_asset / price) if price > 0 else 0
+                    actual_invest = qty * price
+                    div_amt = actual_invest * div_yield
+                    
+                    sim_rows.append({
+                        "หมวดหมู่ (Category)": cat,
+                        "ชื่อ (Asset)": asset,
+                        "จำนวนเงิน (Invested)": actual_invest,
+                        "จำนวนหุ้น (Qty)": qty,
+                        "%ปันผล (Yield)": div_yield * 100,
+                        "ปันผล (บาท)": div_amt
+                    })
+        
+        if sim_rows:
+            st.markdown("#### 2. ตารางสรุปพอร์ตโฟลิโอ (Portfolio Summary)")
+            df_sim_final = pd.DataFrame(sim_rows)
+            
+            # Show DataFrame
+            st.dataframe(
+                df_sim_final.style.format({
+                    'จำนวนเงิน (Invested)': '{:,.2f}',
+                    'จำนวนหุ้น (Qty)': '{:,}',
+                    '%ปันผล (Yield)': '{:.2f}%',
+                    'ปันผล (บาท)': '{:,.2f}'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Summary Metrics
+            total_inv = df_sim_final['จำนวนเงิน (Invested)'].sum()
+            total_div = df_sim_final['ปันผล (บาท)'].sum()
+            avg_yield_port = (total_div / total_inv * 100) if total_inv > 0 else 0
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("มูลค่าพอร์ตคาดการณ์", f"{total_inv:,.0f} บาท")
+            m2.metric("เงินปันผลรายปี (โดยประมาณ)", f"{total_div:,.2f} บาท")
+            m3.metric("อัตราผลตอบแทนเฉลี่ย (Yield)", f"{avg_yield_port:.2f}%")
+            
+            st.caption("*หมายเหตุ: ข้อมูลหุ้นไทยอ้างอิงราคาล่าสุด | กองทุนและตราสารหนี้ใช้ราคาและผลตอบแทนสมมติเพื่อการคำนวณเท่านั้น")
+
 elif page == "พอร์ตของฉัน (My Portfolio)":
     st.title("🎒 พอร์ตของฉัน (My Portfolio)")
     st.markdown("บันทึกการซื้อขายและติดตามผลกำไรขาดทุนของพอร์ตโฟลิโอ")
