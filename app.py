@@ -35,6 +35,10 @@ with st.sidebar.expander("ตั้งค่าสมมติฐาน (Assumpt
     st_rm = st.number_input("ผลตอบแทนตลาด (Market Return %)", value=MARKET_RETURN*100, step=0.1, format="%.2f") / 100
     st_g = st.number_input("การเติบโตระยะยาว (Terminal Growth %)", value=LONG_TERM_GROWTH*100, step=0.1, format="%.2f") / 100
     
+    st.markdown("---")
+    st.markdown("**กำหนดค่า K เอง (Override CAPM)**")
+    st_k_manual = st.number_input("ผลตอบแทนที่คาดหวัง (Required Return / K %)", value=0.0, step=0.1, format="%.2f", help="ใส่ 0 หากต้องการใช้ค่า K จากสูตร CAPM ตามปกติ") / 100
+    
     if st.button("รีเซ็ตค่าเริ่มต้น"):
         st.cache_data.clear() # Optional but good
         st.rerun()
@@ -85,7 +89,7 @@ def fetch_raw_market_data():
     my_bar.empty()
     return results
 
-def process_valuations(raw_data, rf, rm, g):
+def process_valuations(raw_data, rf, rm, g, manual_k=0):
     """
     Calculates valuation on raw data with specific parameters.
     """
@@ -93,7 +97,7 @@ def process_valuations(raw_data, rf, rm, g):
     for item in raw_data:
         # Clone item to avoid modifying cached dict in place across reruns (shallow copy often enough but dict copy is safer)
         data_copy = item.copy()
-        evaluated_data = utils.calculate_valuations(data_copy, risk_free_rate=rf, market_return=rm, long_term_growth=g)
+        evaluated_data = utils.calculate_valuations(data_copy, risk_free_rate=rf, market_return=rm, long_term_growth=g, manual_k=manual_k)
         if evaluated_data:
             results.append(evaluated_data)
     return pd.DataFrame(results)
@@ -104,7 +108,7 @@ if not raw_data_list:
     st.error("Failed to fetch data.")
     st.stop()
 
-df = process_valuations(raw_data_list, st_rf, st_rm, st_g)
+df = process_valuations(raw_data_list, st_rf, st_rm, st_g, st_k_manual)
 
 if not df.empty:
     # --- GLOBAL DATA ENRICHMENT ---
@@ -173,6 +177,21 @@ if page == "แดชบอร์ดภาพรวม":
     # Dashboard uses 'df' loaded globally
     
     if not df.empty:
+        # --- Styling Functions ---
+        def highlight_price_ddm(x):
+            df_st = pd.DataFrame('', index=x.index, columns=x.columns)
+            if 'ราคา' in x.columns and 'DDM' in x.columns:
+                 # DDM > Price -> Green (Undervalued)
+                 # DDM < Price -> Red (Overvalued)
+                 # Only if DDM > 0
+                 mask_valid = (x['DDM'] > 0)
+                 mask_green = mask_valid & (x['DDM'] > x['ราคา'])
+                 mask_red = mask_valid & (x['DDM'] < x['ราคา'])
+                 
+                 df_st.loc[mask_green, 'ราคา'] = 'background-color: #d4edda; color: black' # Light Green
+                 df_st.loc[mask_red, 'ราคา'] = 'background-color: #f8d7da; color: black' # Light Red
+            return df_st
+
         # Key Metrics
         col1, col2, col3 = st.columns(3)
         undervalued_count = df[df['status'] == 'Undervalued'].shape[0]
@@ -361,10 +380,10 @@ if page == "แดชบอร์ดภาพรวม":
             
             # Display Top 10 nicely
             cols_to_show = [
-                'symbol', 'VI Score', 'price', 'fair_value'
+                'symbol', 'VI Score', 'price', 'fair_value', 'valuation_ddm'
             ]
             col_names = [
-                'หุ้น', 'VI Score', 'ราคา', 'Fair'
+                'หุ้น', 'VI Score', 'ราคา', 'Fair', 'DDM'
             ]
             
             # If advanced analysis is done, insert Graham next to Fair Value
@@ -383,20 +402,27 @@ if page == "แดชบอร์ดภาพรวม":
                  cols_to_show.extend(['graham_num', 'vi_price', 'vi_mos'])
                  col_names.extend(['Graham', 'VI Price', 'VI MOS%'])
             else:
-                 # Standard MOS if no Graham
-                 cols_to_show.append('margin_of_safety')
+                 # Standard MOS if no Graham (Override to DDM MOS per user request)
+                 top_picks['mos_ddm'] = top_picks.apply(
+                    lambda row: ((row['valuation_ddm'] - row['price']) / row['valuation_ddm'] * 100) 
+                    if (pd.notna(row['valuation_ddm']) and row['valuation_ddm'] > 0) else -999,
+                    axis=1
+                 )
+                 cols_to_show.append('mos_ddm')
                  col_names.append('MOS%')
 
             # Add remaining base columns
             cols_to_show.extend([
                 'P/E', 'P/BV', 'trailingEps', 'returnOnAssets',
                 'returnOnEquity', 'debtToEquityRatio', 'currentRatio', 'profitMargins',
-                'dividendRate', 'dividendYield_calc', 'VI Score'
+                'dividendRate', 'dividendYield_calc', 'VI Score',
+                'terminal_growth_percent', 'k_percent'
             ])
             col_names.extend([
                 'P/E', 'P/BV', 'EPS', 'ROA%',
                 'ROE%', 'D/E', 'Liquidity', 'NPM%',
-                'ปันผล(฿)', 'ปันผล(%)', 'VI Score'
+                'ปันผล(฿)', 'ปันผล(%)', 'VI Score',
+                'G%', 'K%'
             ])
             
             # Add remaining advanced columns
@@ -414,6 +440,7 @@ if page == "แดชบอร์ดภาพรวม":
             fmt_dict = {
                 'ราคา': '{:.2f}',
                 'Fair': '{:.2f}',
+                'DDM': '{:.2f}',
                 'Graham': '{:.2f}',
                 'VI Price': '{:.2f}',
                 'VI MOS%': '{:.2f}',
@@ -435,7 +462,9 @@ if page == "แดชบอร์ดภาพรวม":
                 'VI Score': '{:.0f}',
                 'FCF%': '{:.2%}',
                 'Z-Score': '{:.2f}',
-                'SGR%': '{:.2%}'
+                'SGR%': '{:.2%}',
+                'G%': '{:.2f}',
+                'K%': '{:.2f}'
             }
             
             # Determine which MOS column to use for gradient
@@ -451,7 +480,8 @@ if page == "แดชบอร์ดภาพรวม":
             st.dataframe(
                 top_display.style.format(fmt_dict)
                 .background_gradient(subset=[mos_col], cmap='Greens')
-                .apply(highlight_vi_price, axis=None),
+                .apply(highlight_vi_price, axis=None)
+                .apply(highlight_price_ddm, axis=None),
                 use_container_width=True
             )
         else:
@@ -470,33 +500,75 @@ if page == "แดชบอร์ดภาพรวม":
         filtered_df['P/BV'] = filtered_df.apply(lambda row: row['price'] / row['bookValue'] if row['bookValue'] > 0 else 0, axis=1)
         
         filtered_df['dividendYield_pct'] = filtered_df.apply(lambda row: row['dividendRate'] / row['price'] if row['price'] > 0 else 0, axis=1)
+
+        # --- Calculate Graham Number & VI Price (Consistency with Super Stocks) ---
+        # Graham Number = Sqrt(22.5 * EPS * BVPS)
+        filtered_df['graham_num'] = filtered_df.apply(
+            lambda row: (22.5 * row['trailingEps'] * row['bookValue'])**0.5 
+            if (row['trailingEps'] > 0 and row['bookValue'] > 0) else 0, 
+            axis=1
+        )
+
+        # VI Price = Average(Fair Value, Graham Number)
+        def calc_vi_price_main(row):
+             vals = []
+             if row['fair_value'] > 0: vals.append(row['fair_value'])
+             if row['graham_num'] > 0: vals.append(row['graham_num'])
+             return sum(vals) / len(vals) if vals else 0
+
+        filtered_df['vi_price'] = filtered_df.apply(calc_vi_price_main, axis=1)
+        
+        # Override MOS% to be based on DDM per user request
+        # If DDM is invalid or 0, MOS% will be -100 or NaN (handled by fillna before?)
+        filtered_df['mos_ddm'] = filtered_df.apply(
+            lambda row: ((row['valuation_ddm'] - row['price']) / row['valuation_ddm'] * 100) 
+            if (pd.notna(row['valuation_ddm']) and row['valuation_ddm'] > 0) else -999, # -999 for N/A
+            axis=1
+        )
         
         display_df = filtered_df[[
-            'symbol', 'price', 'fair_value', 'margin_of_safety', 
+            'symbol', 'price', 'fair_value', 'valuation_ddm', 'graham_num', 'vi_price', 'mos_ddm', 
             'P/E', 'pegRatio', 'P/BV', 'trailingEps', 
             'returnOnAssets', 'returnOnEquity', 
             'grossMargins', 'operatingMargins', 'profitMargins',
             'debtToEquityRatio', 'currentRatio', 'quickRatio',
             'revenueGrowth', 'enterpriseToEbitda',
-            'dividendRate', 'dividendYield_pct', 'Quality Score'
+            'dividendRate', 'dividendYield_pct', 'Quality Score',
+            'terminal_growth_percent', 'k_percent'
         ]].copy()
         
         # Rename columns for readable headers
         display_df.columns = [
-            'หุ้น', 'ราคา', 'Fair', 'MOS%',
+            'หุ้น', 'ราคา', 'Fair', 'DDM', 'Graham', 'VI Price', 'MOS%',
             'P/E', 'PEG', 'P/BV', 'EPS',
             'ROA%', 'ROE%',
             'GPM%', 'OPM%', 'NPM%',
             'D/E', 'Liquidity', 'Quick',
             'Growth%', 'EV/EBITDA',
-            'ปันผล(฿)', 'ปันผล(%)', 'Q-Score'
+            'ปันผล(฿)', 'ปันผล(%)', 'Q-Score',
+            'G%', 'K%'
         ]
         
+        # Determine Fair Price column to highlight (Fair or VI Price if exists)
+        # Note: In main screener we only have 'Fair' (fair_value).
+        
+        def highlight_fair_main(x):
+            df_st = pd.DataFrame('', index=x.index, columns=x.columns)
+            if 'VI Price' in x.columns:
+                df_st['VI Price'] = 'background-color: #fff9c4; color: black; font-weight: bold'
+            if 'Fair' in x.columns:
+                 # Highlight Fair as well if preferred, or just VI Price
+                 pass
+            return df_st
+
         # Apply formatting
         st.dataframe(
             display_df.style.format({
                 'ราคา': '{:.2f}', 
                 'Fair': '{:.2f}', 
+                'DDM': '{:.2f}',
+                'Graham': '{:.2f}',
+                'VI Price': '{:.2f}',
                 'MOS%': '{:.2f}',
                 'P/E': '{:.2f}',
                 'PEG': '{:.2f}',
@@ -513,8 +585,13 @@ if page == "แดชบอร์ดภาพรวม":
                 'Growth%': '{:.2%}',
                 'EV/EBITDA': '{:.2f}',
                 'ปันผล(฿)': '{:.2f}',
-                'ปันผล(%)': '{:.2%}'
-            }).apply(lambda x: ['background-color: rgba(16, 185, 129, 0.2)' if x['MOS%'] > 15 else '' for i in x], axis=1),
+                'ปันผล(%)': '{:.2%}',
+                'G%': '{:.2f}',
+                'K%': '{:.2f}'
+            })
+            .apply(lambda x: ['background-color: rgba(16, 185, 129, 0.2)' if x['MOS%'] > 15 else '' for i in x], axis=1)
+            .apply(highlight_fair_main, axis=None)
+            .apply(highlight_price_ddm, axis=None),
             use_container_width=True,
             height=600
         )
@@ -522,30 +599,51 @@ if page == "แดชบอร์ดภาพรวม":
         st.info("💡 **เกร็ดความรู้:** หุ้นที่มี 'MOS (%)' เขียว (> 15%) คือหุ้นที่มีส่วนลดจากมูลค่าจริงมาก")
         
         with st.expander("📖 อธิบายความหมายอัตราส่วนทางการเงิน (Financial Glossary)"):
-            st.markdown("""
-            *   **P/E (Price-to-Earnings Ratio):** ความถูกแพงของหุ้นเทียบกับกำไรสุทธิ (ค่ายิ่งต่ำยิ่งถูก)
-            *   **PEG (P/E to Growth):** P/E เทียบกับการเติบโตของกำไร (ค่า < 1 แสดงว่าหุ้นยังถูกเมื่อเทียบกับการเติบโต)
-            *   **P/BV (Price-to-Book Ratio):** ราคาหุ้นเทียบกับมูลค่าทางบัญชี (ค่ายิ่งต่ำยิ่งถูก, < 1 แสดงว่าซื้อต่ำกว่ามูลค่าสินทรัพย์)
-            *   **EPS (Earnings Per Share):** กำไรสุทธิต่อหุ้น 1 หุ้น (ยิ่งมากยิ่งดี)
-            *   **ROA (Return on Assets):** ความสามารถในการทำกำไรจากสินทรัพย์ที่มี (ยิ่งสูงยิ่งดี, บ่งบอกประสิทธิภาพผู้บริหาร)
-            *   **ROE (Return on Equity):** ผลตอบแทนต่อส่วนของผู้ถือหุ้น (ยิ่งสูงยิ่งดี, Warren Buffett ชอบ > 15%)
-            *   **GPM (Gross Profit Margin):** อัตรากำไรขั้นต้น (ขายของได้กำไรกี่ % ก่อนหักค่าใช้จ่ายบริหาร)
-            *   **OPM (Operating Profit Margin):** อัตรากำไรจากการดำเนินงาน (วัดประสิทธิภาพธุรกิจหลัก)
-            *   **NPM (Net Profit Margin):** อัตรากำไรสุทธิ (กำไรบรรทัดสุดท้าย / รายได้, ยิ่งสูงยิ่งดี)
-            *   **D/E (Debt-to-Equity Ratio):** หนี้สินต่อทุน (ค่ายิ่งต่ำยิ่งปลอดภัย, ไม่ควรเกิน 2 เท่า)
-            *   **Current Ratio:** อัตราส่วนสภาพคล่อง (สินทรัพย์หมุนเวียน / หนี้สินหมุนเวียน, ควร > 1.5 เท่า)
-            *   **Quick Ratio:** สภาพคล่องหมุนเวียนเร็ว (ตัดสต็อกสินค้าออก, วัดความสามารถชำระหนี้ระยะสั้นแบบเข้มข้น)
-            *   **Rev Growth:** อัตราการเติบโตของรายได้ (เทียบปีต่อปี)
-            *   **EV/EBITDA:** มูลค่ากิจการเทียบกับกำไรเงินสด (ใช้ดูความถูกแพงแทน P/E ได้ดีในหุ้นที่มีค่าเสื่อมเยอะ)
-            *   **ปันผล (Dividend):** เงินปันผลที่จ่ายให้ผู้ถือหุ้น (บาท)
-            *   **F-Score (Piotroski F-Score):** คะแนนสุขภาพทางการเงิน 9 ด้าน (9 = แข็งแกร่งที่สุด, < 4 = อ่อนแอ)
-            *   **ROC (Return on Capital):** ผลตอบแทนจากเงินลงทุนดำเนินงาน (หัวใจของ Magic Formula, ยิ่งสูงยิ่งดี)
-            *   **E.Yield (Earnings Yield):** ผลตอบแทนกำไรเมื่อเทียบกับมูลค่ากิจการ (ส่วนกลับของ P/E, ยิ่งสูงยิ่งคุ้มค่า)
-            *   **Super Score:** คะแนนรวมพิเศษจากโปรแกรมนี้ (เต็ม 100) คำนวณจาก MOS, F-Score, Magic Rank, ROE และปันผล
-            *   **Graham Number:** ราคาที่เหมาะสมตามสูตร Benjamin Graham (บิดาแห่ง VI) เน้นสินทรัพย์และกำไร
-            *   **FCF Yield (Free Cash Flow Yield):** ผลตอบแทนจากกระแสเงินสดอิสระ (เงินสดจริงที่บริษัททำได้) เทียบกับมูลค่ากิจการ
-            *   **Z-Score (Altman Z-Score):** ดัชนีชี้วัดความเสี่ยงล้มละลาย (Safe > 2.99, Distress < 1.81) ช่วยกรองหุ้นเน่า
-            *   **SGR (Sustainable Growth Rate):** อัตราการเติบโตที่ยั่งยืนด้วยเงินทุนตัวเอง (ไม่กู้เพิ่ม/ไม่เพิ่มทุน)
+            st.markdown(r"""
+            ### 🧮 สูตรการคำนวณและคำอธิบาย (Formulas & Definitions)
+
+            #### 1. ความถูกแพง (Valuation)
+            *   **P/E (Price-to-Earnings Ratio):** ความถูกแพงของหุ้นเทียบกับกำไรสุทธิ
+                $$ \text{P/E} = \frac{\text{Price}}{\text{EPS}} $$
+            *   **PEG (P/E to Growth):** P/E เทียบกับการเติบโตของกำไร
+                $$ \text{PEG} = \frac{\text{P/E}}{\text{Earnings Growth (\%)}} $$
+            *   **P/BV (Price-to-Book Ratio):** ราคาหุ้นเทียบกับมูลค่าทางบัญชี
+                $$ \text{P/BV} = \frac{\text{Price}}{\text{Book Value per Share}} $$
+            *   **EV/EBITDA:** มูลค่ากิจการเทียบกับกำไรเงินสด
+                $$ \text{EV/EBITDA} = \frac{\text{Market Cap + Debt - Cash}}{\text{EBITDA}} $$
+
+            #### 2. ประสิทธิภาพ (Efficiency)
+            *   **ROE (Return on Equity):** ผลตอบแทนต่อส่วนของผู้ถือหุ้น
+                $$ \text{ROE} = \frac{\text{Net Income}}{\text{Shareholders' Equity}} \times 100 $$
+            *   **ROA (Return on Assets):** ความสามารถในการทำกำไรจากสินทรัพย์
+                $$ \text{ROA} = \frac{\text{Net Income}}{\text{Total Assets}} \times 100 $$
+            *   **ROC (Return on Capital):** ผลตอบแทนจากเงินลงทุนดำเนินงาน (Magic Formula)
+                $$ \text{ROC} = \frac{\text{EBIT}}{\text{Net Working Capital} + \text{Net Fixed Assets}} $$
+
+            #### 3. สุขภาพทางการเงิน (Health)
+            *   **D/E (Debt-to-Equity Ratio):** หนี้สินต่อทุน
+                $$ \text{D/E} = \frac{\text{Total Debt}}{\text{Shareholders' Equity}} $$
+            *   **Current Ratio:** สภาพคล่องหมุนเวียน
+                $$ \text{Current Ratio} = \frac{\text{Current Assets}}{\text{Current Liabilities}} $$
+            *   **Z-Score (Altman Z-Score):** ดัชนีชี้วัดความเสี่ยงล้มละลาย (Manufacturing Model)
+                $$ Z = 1.2A + 1.4B + 3.3C + 0.6D + 1.0E $$
+                (A=WC/TA, B=RE/TA, C=EBIT/TA, D=MktCap/Liab, E=Sales/TA)
+
+            #### 4. การประเมินมูลค่า (Valuation Models)
+            *   **Fair Price (ราคาเหมาะสม):** ค่าเฉลี่ยของ 3 วิธี (DDM, Target P/E, Target P/BV)
+            *   **DDM (Dividend Discount Model):** คิดลดเงินปันผล 2 ช่วง (5 ปีแรก + Terminal Value)
+                $$ \text{Value} = \sum_{t=1}^{5} \frac{D_0(1+g)^t}{(1+k)^t} + \frac{D_5(1+g)}{(k-g)(1+k)^5} $$
+            *   **Graham Number:** ราคาที่เหมาะสมตามสูตร Benjamin Graham
+                $$ \text{Graham Num} = \sqrt{22.5 \times \text{EPS} \times \text{BVPS}} $$
+            *   **VI Price:** ราคาเหมาะสมแบบ VI ประยุกต์
+                $$ \text{VI Price} = \frac{\text{Fair Price} + \text{Graham Number}}{2} $$
+
+            #### 5. ตัวแปรสมมติฐาน (Assumptions)
+            *   **G% (Terminal Growth Rate):** อัตราการเติบโตระยะยาวที่ใช้ในสูตร DDM และ Target Multiples
+            *   **K% (Required Return):** ผลตอบแทนคาดหวัง (Discount Rate) คำนวณจาก CAPM หรือกำหนดเอง
+                $$ k = R_f + \beta (R_m - R_f) $$
+            *   **MOS% (Margin of Safety):** ส่วนเผื่อความปลอดภัย (เทียบกับ DDM)
+                $$ \text{MOS\%} = \frac{\text{DDM} - \text{Price}}{\text{DDM}} \times 100 $$
             """)
         
         # --- Display Advanced Results if available (Optional: Keep it hidden or move to debug) ---
