@@ -1191,16 +1191,19 @@ elif page == "แนะนำพอร์ตการลงทุน":
                         # Try to get yield from multiple sources
                         div_yield = 0
                         
-                        # 1. Try explicit dividendYield
-                        y_val = row.get('dividendYield', 0)
-                        if pd.notnull(y_val) and y_val > 0:
-                            div_yield = y_val
+                        # 1. Try calculation from Rate/Price first (Standard Decimal)
+                        d_rate = row.get('dividendRate', 0)
+                        if pd.notnull(d_rate) and d_rate > 0 and price > 0:
+                            div_yield = d_rate / price
                         
-                        # 2. If 0, try dividendRate / price
-                        if div_yield == 0 and price > 0:
-                            d_rate = row.get('dividendRate', 0)
-                            if pd.notnull(d_rate) and d_rate > 0:
-                                div_yield = d_rate / price
+                        # 2. Fallback to reported dividendYield
+                        if div_yield == 0:
+                            y_val = row.get('dividendYield', 0)
+                            if pd.notnull(y_val) and y_val > 0:
+                                div_yield = y_val
+                                # Heuristic: If yield > 0.5 (50%), assuming it's percentage (e.g. 4.61) -> convert to decimal
+                                if div_yield > 0.5:
+                                    div_yield /= 100
                     else:
                         # Fallback to Proxy
                         if cat == "Fixed Income":
